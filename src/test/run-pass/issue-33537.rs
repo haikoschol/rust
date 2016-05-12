@@ -8,10 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![deny(warnings)]
+#![feature(const_fn)]
+
+const fn foo() -> *const i8 {
+    b"foo" as *const _ as *const i8
+}
+
+const fn bar() -> i32 {
+    *&{(1, 2, 3).1}
+}
 
 fn main() {
-    // Remove this whenever snapshots and rustbuild nightlies are synced.
-    println!("cargo:rustc-cfg=cargobuild");
-    println!("cargo:rerun-if-changed=build.rs")
+    assert_eq!(foo(), b"foo" as *const _ as *const i8);
+    assert_eq!(bar(), 2);
 }

@@ -346,6 +346,8 @@ impl UnsafetyState {
 
 #[derive(Clone)]
 pub struct FnCtxt<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
+    ast_ty_to_ty_cache: RefCell<NodeMap<Ty<'tcx>>>,
+
     body_id: ast::NodeId,
 
     // This flag is set to true if, during the writeback phase, we encounter
@@ -1151,7 +1153,8 @@ fn check_const<'a,'tcx>(ccx: &CrateCtxt<'a,'tcx>,
                         sp: Span,
                         e: &'tcx hir::Expr,
                         id: ast::NodeId) {
-    ccx.inherited(None).enter(|inh| {
+    let param_env = ParameterEnvironment::for_item(ccx.tcx, id);
+    ccx.inherited(Some(param_env)).enter(|inh| {
         let rty = ccx.tcx.node_id_to_type(id);
         let fcx = FnCtxt::new(&inh, ty::FnConverging(rty), e.id);
         let declty = fcx.tcx.lookup_item_type(ccx.tcx.map.local_def_id(id)).ty;
@@ -1261,6 +1264,10 @@ pub fn check_enum_variants<'a,'tcx>(ccx: &CrateCtxt<'a,'tcx>,
 
 impl<'a, 'gcx, 'tcx> AstConv<'gcx, 'tcx> for FnCtxt<'a, 'gcx, 'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'b, 'gcx, 'tcx> { self.tcx }
+
+    fn ast_ty_to_ty_cache(&self) -> &RefCell<NodeMap<Ty<'tcx>>> {
+        &self.ast_ty_to_ty_cache
+    }
 
     fn get_item_type_scheme(&self, _: Span, id: DefId)
                             -> Result<ty::TypeScheme<'tcx>, ErrorReported>
@@ -1434,6 +1441,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                body_id: ast::NodeId)
                -> FnCtxt<'a, 'gcx, 'tcx> {
         FnCtxt {
+            ast_ty_to_ty_cache: RefCell::new(NodeMap()),
             body_id: body_id,
             writeback_errors: Cell::new(false),
             err_count_on_creation: inh.tcx.sess.err_count(),
@@ -3045,12 +3053,18 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
 
         if let Some((did, field_ty)) = private_candidate {
             let struct_path = self.tcx().item_path_str(did);
-            let msg = format!("field `{}` of struct `{}` is private", field.node, struct_path);
-            self.tcx().sess.span_err(expr.span, &msg);
             self.write_ty(expr.id, field_ty);
+            let msg = format!("field `{}` of struct `{}` is private", field.node, struct_path);
+            let mut err = self.tcx().sess.struct_span_err(expr.span, &msg);
+            // Also check if an accessible method exists, which is often what is meant.
+            if self.method_exists(field.span, field.node, expr_t, expr.id, false) {
+                err.note(&format!("a method `{}` also exists, perhaps you wish to call it",
+                                  field.node));
+            }
+            err.emit();
         } else if field.node == keywords::Invalid.name() {
             self.write_error(expr.id);
-        } else if self.method_exists(field.span, field.node, expr_t, expr.id) {
+        } else if self.method_exists(field.span, field.node, expr_t, expr.id, true) {
             self.type_error_struct(field.span, |actual| {
                 format!("attempted to take value of method `{}` on type \
                          `{}`", field.node, actual)
@@ -3299,7 +3313,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         let expr_ty = self.instantiate_type(def.def_id(), path);
         self.write_ty(expr.id, expr_ty);
 
-        self.check_expr_struct_fields(expr_ty, expr.span, variant, fields,
+        self.check_expr_struct_fields(expr_ty, path.span, variant, fields,
                                       base_expr.is_none());
         if let &Some(ref base_expr) = base_expr {
             self.check_expr_has_type(base_expr, expr_ty);
@@ -3845,15 +3859,15 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         if path_res.depth == 0 {
             Some((opt_self_ty, &path.segments, path_res.base_def))
         } else {
-            let mut def = path_res.base_def;
+            let def = path_res.base_def;
             let ty_segments = path.segments.split_last().unwrap().1;
             let base_ty_end = path.segments.len() - path_res.depth;
-            let ty = AstConv::finish_resolving_def_to_ty(self, self, span,
-                                                         PathParamMode::Optional,
-                                                         &mut def,
-                                                         opt_self_ty,
-                                                         &ty_segments[..base_ty_end],
-                                                         &ty_segments[base_ty_end..]);
+            let (ty, _def) = AstConv::finish_resolving_def_to_ty(self, self, span,
+                                                                 PathParamMode::Optional,
+                                                                 def,
+                                                                 opt_self_ty,
+                                                                 &ty_segments[..base_ty_end],
+                                                                 &ty_segments[base_ty_end..]);
             let item_segment = path.segments.last().unwrap();
             let item_name = item_segment.identifier.name;
             let def = match self.resolve_ufcs(span, item_name, ty, node_id) {

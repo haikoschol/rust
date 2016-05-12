@@ -7,11 +7,15 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
+#![feature(associated_consts)]
 
-#![deny(warnings)]
-
-fn main() {
-    // Remove this whenever snapshots and rustbuild nightlies are synced.
-    println!("cargo:rustc-cfg=cargobuild");
-    println!("cargo:rerun-if-changed=build.rs")
+trait Lattice {
+    const BOTTOM: Self;
 }
+
+// FIXME(#33573): this should work without the 'static lifetime bound.
+impl<T: 'static> Lattice for Option<T> {
+    const BOTTOM: Option<T> = None;
+}
+
+fn main(){}

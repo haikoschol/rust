@@ -28,7 +28,7 @@ use rustc_borrowck as borrowck;
 use rustc_incremental;
 use rustc_resolve as resolve;
 use rustc_metadata::macro_import;
-use rustc_metadata::creader::LocalCrateReader;
+use rustc_metadata::creader::read_local_crates;
 use rustc_metadata::cstore::CStore;
 use rustc_trans::back::link;
 use rustc_trans::back::write;
@@ -37,7 +37,7 @@ use rustc_typeck as typeck;
 use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
-use rustc::hir::lowering::{lower_crate, LoweringContext};
+use rustc::hir::lowering::lower_crate;
 use rustc_passes::{no_asm, loops, consts, rvalues, static_recursion};
 use rustc_const_eval::check_match;
 use super::Compilation;
@@ -138,26 +138,38 @@ pub fn compile_input(sess: &Session,
                                                                  &id),
                                 Ok(()));
 
+        write_out_deps(sess, &outputs, &id);
+
+        controller_entry_point!(after_write_deps,
+                                sess,
+                                CompileState::state_after_write_deps(input,
+                                                                     sess,
+                                                                     outdir,
+                                                                     output,
+                                                                     &cstore,
+                                                                     &expanded_crate,
+                                                                     &id),
+                                Ok(()));
+
         let expanded_crate = assign_node_ids(sess, expanded_crate);
         let dep_graph = DepGraph::new(sess.opts.build_dep_graph());
 
         // Collect defintions for def ids.
-        let defs = &RefCell::new(time(sess.time_passes(),
-                                 "collecting defs",
-                                 || hir_map::collect_definitions(&expanded_crate)));
+        let mut defs = time(sess.time_passes(),
+                            "collecting defs",
+                            || hir_map::collect_definitions(&expanded_crate));
 
         time(sess.time_passes(),
              "external crate/lib resolution",
-             || LocalCrateReader::new(sess, &cstore, defs, &expanded_crate, &id)
-                    .read_crates(&dep_graph));
+             || read_local_crates(sess, &cstore, &defs, &expanded_crate, &id, &dep_graph));
 
         time(sess.time_passes(),
              "early lint checks",
              || lint::check_ast_crate(sess, &expanded_crate));
 
         let (analysis, resolutions, mut hir_forest) = {
-            let defs = &mut *defs.borrow_mut();
-            lower_and_resolve(sess, &id, defs, &expanded_crate, dep_graph, control.make_glob_map)
+            lower_and_resolve(sess, &id, &mut defs, &expanded_crate, dep_graph,
+                              control.make_glob_map)
         };
 
         // Discard MTWT tables that aren't required past lowering to HIR.
@@ -173,25 +185,22 @@ pub fn compile_input(sess: &Session,
                            "indexing hir",
                            move || hir_map::map_crate(hir_forest, defs));
 
-
-        write_out_deps(sess, &outputs, &id);
-
         {
             let _ignore = hir_map.dep_graph.in_ignore();
-            controller_entry_point!(after_write_deps,
+            controller_entry_point!(after_hir_lowering,
                                     sess,
-                                    CompileState::state_after_write_deps(input,
-                                                                         sess,
-                                                                         outdir,
-                                                                         output,
-                                                                         &arenas,
-                                                                         &cstore,
-                                                                         &hir_map,
-                                                                         &analysis,
-                                                                         &resolutions,
-                                                                         &expanded_crate,
-                                                                         &hir_map.krate(),
-                                                                         &id),
+                                    CompileState::state_after_hir_lowering(input,
+                                                                  sess,
+                                                                  outdir,
+                                                                  output,
+                                                                  &arenas,
+                                                                  &cstore,
+                                                                  &hir_map,
+                                                                  &analysis,
+                                                                  &resolutions,
+                                                                  &expanded_crate,
+                                                                  &hir_map.krate(),
+                                                                  &id),
                                     Ok(()));
         }
 
@@ -311,6 +320,7 @@ pub struct CompileController<'a> {
     pub after_parse: PhaseController<'a>,
     pub after_expand: PhaseController<'a>,
     pub after_write_deps: PhaseController<'a>,
+    pub after_hir_lowering: PhaseController<'a>,
     pub after_analysis: PhaseController<'a>,
     pub after_llvm: PhaseController<'a>,
 
@@ -323,6 +333,7 @@ impl<'a> CompileController<'a> {
             after_parse: PhaseController::basic(),
             after_expand: PhaseController::basic(),
             after_write_deps: PhaseController::basic(),
+            after_hir_lowering: PhaseController::basic(),
             after_analysis: PhaseController::basic(),
             after_llvm: PhaseController::basic(),
             make_glob_map: resolve::MakeGlobMap::No,
@@ -433,15 +444,32 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
                               session: &'ast Session,
                               out_dir: &'a Option<PathBuf>,
                               out_file: &'a Option<PathBuf>,
-                              arenas: &'ast ty::CtxtArenas<'ast>,
                               cstore: &'a CStore,
-                              hir_map: &'a hir_map::Map<'ast>,
-                              analysis: &'a ty::CrateAnalysis,
-                              resolutions: &'a Resolutions,
                               krate: &'a ast::Crate,
-                              hir_crate: &'a hir::Crate,
                               crate_name: &'a str)
                               -> CompileState<'a, 'b, 'ast, 'tcx> {
+        CompileState {
+            crate_name: Some(crate_name),
+            cstore: Some(cstore),
+            expanded_crate: Some(krate),
+            out_file: out_file.as_ref().map(|s| &**s),
+            ..CompileState::empty(input, session, out_dir)
+        }
+    }
+
+    fn state_after_hir_lowering(input: &'a Input,
+                                session: &'ast Session,
+                                out_dir: &'a Option<PathBuf>,
+                                out_file: &'a Option<PathBuf>,
+                                arenas: &'ast ty::CtxtArenas<'ast>,
+                                cstore: &'a CStore,
+                                hir_map: &'a hir_map::Map<'ast>,
+                                analysis: &'a ty::CrateAnalysis,
+                                resolutions: &'a Resolutions,
+                                krate: &'a ast::Crate,
+                                hir_crate: &'a hir::Crate,
+                                crate_name: &'a str)
+                                -> CompileState<'a, 'b, 'ast, 'tcx> {
         CompileState {
             crate_name: Some(crate_name),
             arenas: Some(arenas),
@@ -787,8 +815,7 @@ pub fn lower_and_resolve<'a>(sess: &Session,
 
         // Lower ast -> hir.
         let hir_forest = time(sess.time_passes(), "lowering ast -> hir", || {
-            let lcx = LoweringContext::new(sess, Some(krate), &mut resolver);
-            hir_map::Forest::new(lower_crate(&lcx, krate), dep_graph)
+            hir_map::Forest::new(lower_crate(krate, sess, &mut resolver), dep_graph)
         });
 
         (ty::CrateAnalysis {
@@ -1009,7 +1036,7 @@ pub fn phase_4_translate_to_llvm<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         passes.push_pass(box mir::transform::no_landing_pads::NoLandingPads);
         passes.push_pass(box mir::transform::remove_dead_blocks::RemoveDeadBlocks);
         passes.push_pass(box mir::transform::erase_regions::EraseRegions);
-        passes.push_pass(box mir::transform::break_critical_edges::BreakCriticalEdges);
+        passes.push_pass(box mir::transform::break_cleanup_edges::BreakCleanupEdges);
         passes.run_passes(tcx, &mut mir_map);
     });
 

@@ -1949,9 +1949,7 @@ impl<'a> Resolver<'a> {
                                     this.check_trait_item(impl_item.ident.name,
                                                           impl_item.span,
                                         |n, s| ResolutionError::ConstNotMemberOfTrait(n, s));
-                                    this.with_constant_rib(|this| {
-                                        visit::walk_impl_item(this, impl_item);
-                                    });
+                                    visit::walk_impl_item(this, impl_item);
                                 }
                                 ImplItemKind::Method(ref sig, _) => {
                                     // If this is a trait impl, ensure the method
@@ -2544,6 +2542,8 @@ impl<'a> Resolver<'a> {
     /// returned value. See `hir::def::PathResolution` for more info.
     fn resolve_path(&mut self, id: NodeId, path: &Path, path_depth: usize, namespace: Namespace)
                     -> Result<PathResolution, bool /* true if an error was reported */ > {
+        debug!("resolve_path(id={:?} path={:?}, path_depth={:?})", id, path, path_depth);
+
         let span = path.span;
         let segments = &path.segments[..path.segments.len() - path_depth];
 

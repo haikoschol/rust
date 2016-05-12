@@ -8,10 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![deny(warnings)]
+mod sub {
+    pub struct S { len: usize }
+    impl S {
+        pub fn new() -> S { S { len: 0 } }
+        pub fn len(&self) -> usize { self.len }
+    }
+}
 
 fn main() {
-    // Remove this whenever snapshots and rustbuild nightlies are synced.
-    println!("cargo:rustc-cfg=cargobuild");
-    println!("cargo:rerun-if-changed=build.rs")
+    let s = sub::S::new();
+    let v = s.len;
+    //~^ ERROR field `len` of struct `sub::S` is private
+    //~| NOTE a method `len` also exists, perhaps you wish to call it
 }
